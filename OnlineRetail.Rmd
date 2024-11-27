@@ -1,0 +1,710 @@
+---
+title: "Online Retail"
+author: "Vivek Chandra"
+date: "2024-04-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,warning=FALSE}
+
+library(dplyr)
+library(tidyverse)
+library(data.table)
+library(treemap)
+library(caret)
+library(arules)
+library(arulesViz)
+library(corrplot)
+library(lubridate)
+library(ISLR)
+library(boot)
+library(tree)
+library(randomForest)
+library(gbm)
+library(MASS)
+library(TeachingDemos)
+library(class)
+library(reshape2)
+library(rpart)
+library(pROC)
+library(readxl)
+library(nnet)  
+library(e1071)
+
+```
+
+# 1. Tables and Cleanup
+
+```{r}
+
+# Update Path as necessary
+retail <- read.csv("DataCleaned.csv")
+
+categories <- read.csv("OnlineRetailCategories.csv")
+
+```
+
+Add total sale
+
+```{r}
+retail <- transform( 
+  retail, totalSale= (retail$UnitPrice * retail$Quantity))
+
+invoice <- retail %>%
+    group_by(InvoiceNo) %>%
+    summarise(totalInvSale = sum(totalSale))
+
+retail <- merge(x = retail, y = invoice, by = "InvoiceNo")
+
+retail <- retail %>% drop_na(Quantity)
+
+```
+
+### Find total transaction type by Customer and StockCode
+
+transType tells if the total quantity of a product for a customer is neg, total return, or positive. If positive, customer did not return all of a specific product they purchased. If "total return", customer returned all the specific product. If neg, customer based on records seemed to return more than they had, but it is unknown why. Maybe purchased before dataset timeline. Maybe it includes items the company bought. Remove any of the categories as necessary.
+
+```{r,warning=FALSE}
+custTotals <- retail %>%
+  group_by(CustomerID, StockCode) %>%
+  summarise(totalQuant = sum(Quantity))
+
+negReturn <- custTotals[custTotals$totalQuant < '0', ]
+
+retail2 <- merge(x = retail, y = custTotals, by = c("CustomerID","StockCode"))
+
+```
+
+## Overall Retail Table to Use
+
+```{r}
+retail2$transType <- NA
+retail2$transType[retail2$totalQuant < 0] <- 'negative'
+retail2$transType[retail2$totalQuant == 0] <- 'total return'
+retail2$transType[retail2$totalQuant > 0] <- 'positive'
+
+retail2
+```
+
+## Retail without NA for CustomerID or Invoice
+
+```{r}
+retailNoNA <- retail2 %>% drop_na(CustomerID)
+retailNoNA <- retailNoNA %>% drop_na(InvoiceNo)
+
+```
+
+## Sub Tables
+
+```{r}
+sales <- retail2[retail2$Quantity > '0', ]
+
+returns <- retail2[retail2$Quantity <= '0', ]
+
+food <- subset(retail2, Category == "Food" | Category == "Drinks" | Category == "Dishes" | Category == "Food Utensiles" | Category =="Cooking")
+
+entertainment <- subset(retail2, Category == "Games" | Category == "Music" | Category == "Books" | Category == "Crafts" | Category == "Toys")
+
+tools <- subset(retail2, Category =="Tools" | Category == "Writing Utensiles" | Category =="Incense" | Category =="Storage" | Category == "Travel")
+
+dress <- subset(retail2, Category == "Clothes" | Category == "Accessories" | Category == "Jewelry")
+
+decs <- subset(retail2, Category == "Art" | Category =="Candles" | Category =="Decorations")
+
+furnitures <- subset(retail2, Category =="Furniture" | Category == "Lights")
+
+mail <- subset(retail2, Category == "Mail" | Category == "Gifts")
+
+
+```
+
+# 2. General Info
+
+```{r}
+print(paste0("Retail: ", nrow(retail2)))
+print(paste0("Sales: ", nrow(sales)))
+print(paste0("Returns: ", nrow(returns)))
+print(paste0("All Food Categories: ", nrow(food)))
+print(paste0("All Entertainment Categories: ", nrow(entertainment)))
+print(paste0("All Tool Categories: ", nrow(tools)))
+print(paste0("All Dress Categories: ", nrow(dress)))
+print(paste0("All Decoration Categories: ", nrow(decs)))
+print(paste0("All Furniture Categories: ", nrow(furnitures)))
+print(paste0("All Mail Categories: ", nrow(mail)))
+
+
+```
+
+```{r}
+uniqueN(retail2, by = c("Category"))
+uniqueN(retail2, by = c("CustomerID"))
+uniqueN(retail2, by = c("InvoiceNo"))
+uniqueN(retailNoNA, by = c("CustomerID"))
+uniqueN(retailNoNA, by = c("InvoiceNo"))
+uniqueN(retail2, by = c("StockCode"))
+uniqueN(retailNoNA, by = c("StockCode"))
+
+```
+
+Sales/Returns
+
+```{r}
+sum(sales$totalSale)
+sum(returns$totalSale)
+sum(sales$totalSale) + sum(returns$totalSale)
+
+```
+
+## Largest Occasion
+
+```{r}
+occasionCounts <- retail2 %>%
+    group_by(Occasion) %>%
+    summarise(count=n())
+
+occasionCounts
+
+occasionProdCounts <- categories %>%
+    group_by(Occasion) %>%
+    summarise(count=n())
+
+occasionProdCounts
+
+salesByOcc <- sales %>%
+    group_by(Occasion) %>%
+    summarise(totalOccSales = sum(totalSale))
+
+salesByOcc
+
+```
+
+```{r}
+designCounts <- categories %>%
+    group_by(Design) %>%
+    summarise(count=n())
+
+designCounts
+```
+
+## Largest Category - Num Products
+
+```{r}
+
+categoryCounts <- categories %>%
+    group_by(Category) %>%
+    summarise(count=n())
+
+categoryCounts <- categoryCounts[categoryCounts$count != '22', ]
+
+categoryCounts <- categoryCounts[order(categoryCounts$count),]
+
+sum(categoryCounts$count)
+
+categoryCounts <- transform( 
+  categoryCounts, percent= (categoryCounts$count / 3791)*100)
+
+categoryCounts
+
+```
+
+Number of Products vs Number Sold by Category
+
+```{r}
+
+retailCats <- retail2 %>%
+    group_by(Category) %>%
+    summarise(count=n())
+
+retailCats <- retailCats[retailCats$count != '1', ]
+
+
+retailCats <- transform( 
+  retailCats, percent= (retailCats$count / 536357)*100)
+
+#removes scientific notation
+withr::local_options(list(scipen = 999))
+
+prod_vs_sold <- merge(x = retailCats, y = categoryCounts, by = "Category")
+
+prod_vs_sold
+
+```
+
+## Largest Category - TotalSales
+
+```{r}
+salesByCat <- sales %>%
+    group_by(Category) %>%
+    summarise(totalCatSale = sum(totalSale))
+
+salesByCat <- transform( 
+  salesByCat, percent= (salesByCat$totalCatSale / 10024418)*100)
+
+salesByCat
+
+
+```
+
+```{r}
+legend_colors <- c("% of Products Sold" = "red", "% of Available Product Categories" = "blue", "% of Total Sales" = "green")
+ggplot() +
+  geom_point(data=prod_vs_sold, aes(percent.x, Category, color = '% of Products Sold' )) +
+  geom_point(data=prod_vs_sold, aes(percent.y, Category, color = '% of Available Product Categories')) + 
+  geom_point(data=salesByCat, aes(percent, Category, color = '% of Total Sales')) + 
+  labs(color = "the legend") + 
+  scale_color_manual(values = legend_colors)
+
+```
+
+For example, Travel products make up about 5.5% of the available products, but out of all items sold, Travel products make up about 11.5% and have 12.4% of sales. Therefore, maybe adding more travel products options could be an idea, while removing some of the jewelry products (7.8% of all product types, 0.78% of products sold, 0.47% of sales) that are rarely sold, could be advice.
+
+## Countries
+
+```{r}
+countries <- sales %>%
+    group_by(Country) %>%
+    summarise(count=n())
+
+
+countries
+
+```
+
+```{r}
+library(treemap)
+treemap(sales,
+        index      = c("Country"),
+        vSize      = "Quantity",
+        algorithm  = "pivotSize",
+        title      = "The Country with the Most Purchased Products",
+        palette    = "Set3",
+        border.col = "grey20")
+```
+
+# 3. Monthly
+
+## Total Sales by Month
+
+```{r}
+
+retailNoNA$InvoiceDate <- as.Date(retailNoNA$InvoiceDate, format = "%m/%d/%y %H:%M") 
+
+monthly_sales <- retailNoNA %>%
+  filter(Quantity > 0) %>%
+  group_by(Month = floor_date(InvoiceDate, "month")) %>%
+  summarize(TotalSales = sum(totalSale), totalQuant = sum(Quantity), avgUP = mean(UnitPrice))
+
+ 
+# Plotting
+ggplot(monthly_sales, aes(x = Month, y = TotalSales, color = "Total Sales ($)")) +
+  geom_line() +
+  geom_line(aes(y=totalQuant, color="Total Quantity")) +
+  geom_line(aes(y=(avgUP*1000000), color="Average UnitPrice * 1,000,000")) +
+  labs(title = "Monthly Sales Trends", x = "Month", y = "Per Month") + labs(color="Legend text")
+
+```
+
+## Monthly Average UnitPrice - Christmas Products
+
+```{r}
+monthly_XMas <- retailNoNA %>%
+  filter(Occasion == "Christmas") %>%
+  filter(Quantity > 0) %>%
+  group_by(Month = floor_date(InvoiceDate, "month")) %>%
+  summarize(TotalSales = sum(totalSale), totalQuant = sum(Quantity), avgUP = mean(UnitPrice))
+
+ggplot(monthly_XMas, aes(x = Month, y = TotalSales, color = "Total Sales ($)")) +
+  geom_line() +
+  geom_line(aes(y=totalQuant, color="Total Quantity")) +
+  geom_line(aes(y=(avgUP*100000), color="Average UnitPrice * 100,000")) +
+  labs(title = "Monthly Sales Trends - Christmas Products", x = "Month", y = "Per Month") + labs(color="Legend text")
+
+
+```
+
+## Monthly Average UnitPrice - Easter Products
+
+```{r}
+monthly_Easter <- retailNoNA %>%
+  filter(Occasion == "Easter") %>%
+  filter(Quantity > 0) %>%
+  group_by(Month = floor_date(InvoiceDate, "month")) %>%
+  summarize(TotalSales = sum(totalSale), totalQuant = sum(Quantity), avgUP = mean(UnitPrice))
+
+ggplot(monthly_Easter, aes(x = Month, y = TotalSales, color = "Total Sales ($)")) +
+  geom_line() +
+  geom_line(aes(y=totalQuant, color="Total Quantity")) +
+  geom_line(aes(y=(avgUP*1000), color="Average UnitPrice * 1,000")) +
+  labs(title = "Monthly Sales Trends - Easter Products", x = "Month", y = "Per Month") + labs(color="Legend text") + geom_vline(xintercept = as.numeric(as.Date("2011-04-25")), linetype="dotted", color = "Black", size=1)
+
+```
+
+## Monthly Returns
+
+```{r}
+monthly_returns <- retailNoNA %>%
+  filter(Quantity < 0) %>%
+  group_by(Month = floor_date(InvoiceDate, "month")) %>%
+  summarize(TotalSales = sum(totalSale), totalQuant = sum(Quantity))
+ 
+# Plotting
+ggplot(monthly_returns, aes(x = Month, y = TotalSales, color = "Total Returns ($)")) +
+  geom_line() +
+  geom_line(aes(y=totalQuant, color="Total Quantity")) +
+  labs(title = "Monthly Returns Trends", x = "Month", y = "Per Month") + labs(color="Legend text")
+
+```
+
+# 4. Linear Model
+
+```{r}
+
+retail2$Category <- as.factor(retail2$Category)
+
+model_with_category <- lm(totalSale ~ Quantity + UnitPrice  + Category, data = retail2)
+
+summary(model_with_category)
+```
+
+```{r}
+# Diagnostic Plots
+par(mfrow=c(2,2))
+
+plot(model_with_category)
+
+```
+
+**Residuals vs Fitted:** This plot shows if residuals have non-linear patterns. The ideal scenario is a random scatter. Here, the fan-shape pattern suggests heteroscedasticity---residuals vary with the level of fitted values, which violates linear regression assumptions.
+
+**Normal Q-Q:** This plot checks if residuals are normally distributed. The deviation from the line at the ends suggests the presence of outliers affecting normality.
+
+**Scale-Location (Spread-Location):** This plot helps check the assumption of equal variance (homoscedasticity). The increasing spread in residuals against fitted values (a funnel shape) indicates heteroscedasticity.
+
+**Residuals vs Leverage:** This plot helps identify influential cases (outliers). Points with high Cook's distance might be particularly influential to the model's fit. Such points warrant further inv
+
+Solution:
+
+To Handle this we are using Weighted Least Squares (WLS), to transform the dependent variable to stabilize the variance across the range of data.
+
+```{r}
+retail2$weights <- 1 / (retail2$totalSale^2)
+
+# Building the WLS model
+model_wls <- lm(totalSale ~ Quantity + UnitPrice + Category, data = retail2, weights = weights)
+summary(model_wls)
+
+```
+
+## Final Model After removing Statically insignificant Categories
+
+```{r}
+
+# Filtering out the specified categories
+retail2_filtered <- retail2 %>%
+  filter(!Category %in% c("Books", "Clothes", "Incense"))
+
+# Recalculate weights since the dataset has changed
+retail2_filtered$weights <- 1 / (retail2_filtered$totalSale^2)
+
+# Building the WLS model with the filtered data
+model_wls_filtered <- lm(totalSale ~ Quantity + UnitPrice + Category, data = retail2_filtered, weights = weights)
+summary(model_wls_filtered)
+
+
+```
+
+```{r}
+par(mfrow=c(2,2))
+plot(model_wls_filtered)
+```
+
+```{r}
+
+# Extract coefficients
+coef <- coef(model_wls_filtered )
+
+# Plot the observed vs. predicted values
+ggplot(retail2_filtered, aes(x = totalSale, y = fitted(model_wls_filtered))) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  geom_abline(intercept = coef[1], slope = coef[2], color = "red") + # coef[1] = intercept, coef[2] = quantity
+  geom_abline(intercept = coef[1], slope = coef[3], color = "green") + # coef[1] = intercept, coef[3] = UnitPrice
+  labs(x = "Observed Total Sale", y = "Predicted Total Sale") +
+  ggtitle("Observed vs. Predicted Total Sale") +
+  theme_minimal()
+```
+
+## Coefficients
+
+**Quantity:** The coefficient for Quantity is 0.4700937, indicating a positive relationship with totalSale. This suggests that for every unit increase in quantity, the total sale increases by approximately 0.47 units, holding other factors constant. **UnitPrice** Similarly, UnitPrice has a coefficient of 1.2184518, showing a strong positive impact on totalSale. A unit increase in UnitPrice is associated with an increase in total sale by approximately 1.22 units.
+
+## Category Coefficients
+
+Categories like Art, Candles, Cooking, Crafts, etc., show varying degrees of influence on totalSale, with positive coefficients indicating an increase in total sales when items from these categories are sold.
+
+Some categories, such as Jewelry and Writing Utensiles, show negative coefficients, indicating they tend to decrease the totalSale compared to the baseline category (the one not shown, typically the alphabetically first if not explicitly set).
+
+## Statistical Significance: Categories like Books and Clothes were filtered out as they are statically not that significant.
+
+## Model Fit Statistics
+
+**Residual Standard Error:** The RSE of 0.5259 indicates the average difference between the observed totalSales and the values predicted by the model. A lower RSE reflects a model with better predictive accuracy.
+
+**Multiple R-squared:** 0.6163, implying that about 61.63% of the variability in totalSale is explained by the model. This is a good fit, showing the model explains a significant portion of the variance.
+
+**F-statistic:** The very large F-statistic (36650 on 23 and 524735 DF) and a very small p-value indicate that the model as a whole is statistically significant. This means the predictors, when taken together, do significantly affect the totalSale.
+
+# 5. Market Basket Analysis:
+
+Market basket analysis is a data mining technique that analyzes patterns of co-occurrence and determines the strength of the link between products purchased together.
+
+```{r}
+
+# Assuming data is already loaded into the dataframe 'retail_data'
+transactions <- retail2 %>%
+  group_by(InvoiceNo) %>%
+  summarise(Items = list(unique(StockCode))) %>%
+  ungroup()
+
+# Convert the list to a transaction class object
+trans <- as(transactions$Items, "transactions")
+
+rules <- apriori(trans, parameter = list(supp = 0.01, conf = 0.5, minlen = 2))
+
+
+```
+
+```{r}
+# Viewing the top 10 rules sorted by lift
+inspect(sort(rules, by = "lift")[1:10])
+
+```
+
+The table shows the results of a market basket analysis, displaying the top 10 association rules sorted by the metric "lift". Here's what each column represents and how to interpret them:
+
+**lhs (left-hand side):** These are the items (or itemsets) that appear together in the transaction data. Each item is represented by its StockCode. For example, {23170, 23171} means these two items frequently appear together in the same transactions.
+
+**rhs (right-hand side):** This column shows the item (or items) that are likely to be bought together with the items in the lhs. For instance, when {23170, 23171} are bought, {23172} is also likely to be purchased.
+
+**support:** This metric indicates the proportion of all transactions that include all items in both lhs and rhs. For example, a support of 0.0112980 for the first rule means that about 1.13% of all transactions contain items {23170, 23171, 23172}.
+
+**confidence:** This is the probability that an item in rhs is purchased when the items in lhs are purchased. For the first rule, there is about 80.14% confidence that {23172} is purchased when {23170, 23171} are bought.
+
+**coverage:** Represents how often the itemset on the lhs appears in the database. A coverage of 0.0183969 means that 1.84% of transactions include {23170, 23171}.
+
+**lift:** This shows how much more often the lhs and rhs occur together than expected if they were statistically independent. A lift greater than 1, like 59.15158 in the first rule, indicates a strong association between lhs and rhs beyond just chance.
+
+**count:** Indicates the actual number of transactions in which lhs and rhs appear together. For example, {23170, 23171, 23172} appear together in 258 transactions.
+
+```{r,warning=FALSE}
+# May need to install xQuartz to run on Mac. May need to restart Mac. Image will open in a xQuartz window.
+plot(rules, method = "graph", interactive = TRUE)
+
+```
+
+# 6. Customer Spending Classification
+
+```{r}
+retailNoNA2 <- retailNoNA
+customer_spending <- aggregate(`totalSale` ~ CustomerID, retailNoNA2, sum)
+colnames(customer_spending)[2] <- "Customer_Spending"
+retailNoNA2 <- merge(retailNoNA2, customer_spending, by = "CustomerID", all.x = TRUE)
+quantiles <- quantile(retailNoNA2$Customer_Spending, probs = c(0.33, 0.66))
+retailNoNA2$Spending_Category <- cut(retailNoNA2$Customer_Spending,
+                              breaks = c(-Inf, quantiles, Inf),
+                              labels = c("Low Spenders", "Medium Spenders", "High Spenders"),
+                              include.lowest = TRUE)
+
+```
+
+```{r}
+retailNoNA2 <- retailNoNA2 %>%
+  group_by(CustomerID) %>%
+  mutate(Frequency_of_Visit = n()) %>%
+  ungroup()
+
+```
+
+```{r}
+set.seed(123)
+trainIndex <- createDataPartition(retailNoNA2$Spending_Category, p = 0.7, list = FALSE)
+train_data <- retailNoNA2[trainIndex, ]
+test_data <- retailNoNA2[-trainIndex, ]
+```
+
+## Logistic regression
+
+```{r}
+model <- multinom(Spending_Category ~ Frequency_of_Visit + UnitPrice + Quantity, data = train_data)
+predictions <- predict(model, newdata = test_data)
+confusionMatrix(predictions, test_data$Spending_Category)
+```
+
+```{r}
+conf_matrix <- confusionMatrix(predictions, test_data$Spending_Category)
+# Create a data frame from the confusion matrix
+conf_matrix_df <- as.data.frame(conf_matrix$table)
+
+# Create the confusion matrix plot
+ggplot(conf_matrix_df, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 8) +
+  scale_fill_gradient(low = "lightblue", high = "steelblue") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Confusion Matrix",
+       x = "Actual",
+       y = "Predicted")
+
+```
+
+## Random Forest
+
+Occasionally has a memory exhausted error.
+
+```{r,warning=FALSE}
+
+model_rf <- randomForest(Spending_Category ~ Frequency_of_Visit + UnitPrice + Quantity, data = train_data)
+predictions_rf <- predict(model_rf, newdata = test_data)
+confusionMatrix(predictions_rf, test_data$Spending_Category)
+
+```
+
+```{r}
+
+conf_matrix <- confusionMatrix(predictions_rf, test_data$Spending_Category)
+
+# Create a data frame from the confusion matrix
+conf_matrix_df <- as.data.frame(conf_matrix$table)
+
+# Create the confusion matrix plot
+ggplot(conf_matrix_df, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 8) +
+  scale_fill_gradient(low = "lightblue", high = "steelblue") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Confusion Matrix",
+       x = "Actual",
+       y = "Predicted")
+
+```
+
+## Naive Bayes Classifier
+
+```{r}
+
+model_nb <- naiveBayes(Spending_Category ~ Frequency_of_Visit + UnitPrice + Quantity, data = train_data)
+predictions_nb <- predict(model_nb, newdata = test_data)
+confusionMatrix(predictions_nb, test_data$Spending_Category)
+
+
+```
+
+```{r}
+
+conf_matrix <- confusionMatrix(predictions_nb, test_data$Spending_Category)
+
+# Create a data frame from the confusion matrix
+conf_matrix_df <- as.data.frame(conf_matrix$table)
+
+# Create the confusion matrix plot
+ggplot(conf_matrix_df, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 8) +
+  scale_fill_gradient(low = "lightblue", high = "steelblue") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Confusion Matrix",
+       x = "Actual",
+       y = "Predicted")
+
+```
+
+## Regression Tree
+
+```{r}
+
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+```
+
+```{r}
+# Aggregate by customer
+
+retailUK <- retailNoNA %>%
+  filter(Country == "United Kingdom")
+
+customer_summary <- retailUK%>%
+  group_by(CustomerID) %>%
+  summarize(TotalOrders = n_distinct(InvoiceNo),
+            AverageSpending = mean(totalSale),
+            TotalSpending = sum(totalSale), 
+            MostRecentPurchase = max(InvoiceDate),
+            MostFrequentCategory = Mode(Category)
+    )
+  
+customer_summary
+```
+
+```{r}
+quantiles <- quantile(customer_summary$TotalSpending, probs=c(0.33, 0.66))
+customer_summary$SpendingLevel <- cut(customer_summary$TotalSpending, 
+                                      breaks=c(-Inf, quantiles, Inf), 
+                                      labels=c("Low", "Medium", "High"))
+# Binarize the SpendingLevel for a 'High' vs 'Not High' comparison
+customer_summary$IsHighSpending <- as.factor(ifelse(customer_summary$SpendingLevel == "High", "Yes", "No"))
+```
+
+```{r}
+set.seed(123)  
+indexes <- sample(1:nrow(customer_summary), size = 0.7 * nrow(customer_summary), replace = FALSE)
+train <- customer_summary[indexes, ]
+test <- customer_summary[-indexes, ]
+```
+
+```{r}
+# Fit the regression tree
+rpart_model <- rpart(SpendingLevel ~ TotalOrders, data = train, method = "class")
+
+# Plot the tree
+plot(rpart_model, uniform = TRUE, main = "Regression Tree for Spending Level")
+text(rpart_model, use.n = TRUE)
+```
+
+```{r}
+# Prune the tree
+printcp(rpart_model)  # Display the complexity parameter table
+
+# Prune the tree for a chosen complexity parameter (cp)
+pruned_rpart_model <- prune(rpart_model, cp = rpart_model$cptable[which.min(rpart_model$cptable[,"xerror"]),"CP"])
+
+# Plot the pruned tree
+plot(pruned_rpart_model, uniform = TRUE, main = "Pruned Regression Tree for Spending Level")
+text(pruned_rpart_model, use.n = TRUE)
+```
+
+```{r}
+test$predictions <- predict(pruned_rpart_model, newdata = test, type = "class")
+# Generate the confusion matrix
+conf_matrix <- table(Predicted = test$predictions, Actual = test$SpendingLevel)
+print(conf_matrix)
+```
+
+```{r}
+accuracy <- sum(diag(conf_matrix)) / sum(conf_matrix)
+print(paste("Accuracy:", accuracy))
+```
+
+```{r,warning=FALSE}
+library(pROC)
+roc_result <- roc(response = as.factor(test$SpendingLevel), predictor = as.numeric(test$predictions == "High"))
+plot(roc_result, main = "ROC Curve")
+auc(roc_result)
+```
